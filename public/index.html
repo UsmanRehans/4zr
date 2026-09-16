@@ -73,10 +73,9 @@
   <form class="card" id="loginForm">
     <h1>🎯 DoseFuse</h1>
     <p class="sub">Deformable dose accumulation for reirradiation</p>
-    <label>Username</label><input type="text" id="u" autocomplete="username" required>
-    <label>Password</label><input type="password" id="p" autocomplete="current-password" required>
+    <label>Your name</label><input type="text" id="u" autocomplete="name" placeholder="e.g. Dr. Zeinab Reda" required minlength="2" maxlength="40">
     <div class="err" id="loginErr"></div>
-    <button type="submit" id="loginBtn" style="width:100%">Sign in</button>
+    <button type="submit" id="loginBtn" style="width:100%">Continue</button>
     <div class="credit">Made by <b>ZR</b></div>
   </form>
 </div>
@@ -198,7 +197,7 @@ $('loginForm').addEventListener('submit', async e => {
   e.preventDefault(); $('loginErr').textContent=''; $('loginBtn').disabled = true;
   try {
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
-                          body: JSON.stringify({username:$('u').value, password:$('p').value})});
+                          body: JSON.stringify({username:$('u').value})});
     if (!r.ok) { const j = await r.json().catch(()=>({})); $('loginErr').textContent = j.detail || 'Sign-in failed'; return; }
     showApp(); run();
   } finally { $('loginBtn').disabled = false; }

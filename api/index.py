@@ -1,7 +1,7 @@
 """DoseFuse HTTP API (FastAPI) - runs as a Vercel Python function.
 
-Auth: a single demo account from env vars DOSEFUSE_USER / DOSEFUSE_PASSWORD; sessions are
-HMAC-signed HttpOnly cookies (secret DOSEFUSE_SECRET, or derived from the password).
+Access: name-only sign-in (no password). The visitor types their name, which is stored in an
+HMAC-signed HttpOnly cookie (secret DOSEFUSE_SECRET) and recorded with each visit for the audit log.
 """
 import hashlib
 import hmac
@@ -28,11 +28,8 @@ COOKIE = "dosefuse_session"
 SESSION_SECONDS = 7 * 24 * 3600
 
 
-def _creds():
-    user = os.environ.get("DOSEFUSE_USER", "")
-    pw = os.environ.get("DOSEFUSE_PASSWORD", "")
-    secret = os.environ.get("DOSEFUSE_SECRET") or hashlib.sha256(("dosefuse:" + pw).encode()).hexdigest()
-    return user, pw, secret
+def _secret() -> str:
+    return os.environ.get("DOSEFUSE_SECRET") or hashlib.sha256(b"dosefuse:dev").hexdigest()
 
 
 def _sign(msg: str, secret: str) -> str:
@@ -45,16 +42,15 @@ def make_token(user: str, secret: str) -> str:
 
 
 def check_token(token: str | None) -> str | None:
-    user, pw, secret = _creds()
-    if not token or not user:
+    if not token:
         return None
     try:
         name, exp, sig = token.rsplit(":", 2)
     except ValueError:
         return None
-    if not hmac.compare_digest(sig, _sign(f"{name}:{exp}", secret)):
+    if not hmac.compare_digest(sig, _sign(f"{name}:{exp}", _secret())):
         return None
-    if int(exp) < time.time() or name != user:
+    if int(exp) < time.time() or not name:
         return None
     return name
 
@@ -120,13 +116,12 @@ def _fetch_events(limit: int) -> tuple[list[dict], str]:
 
 class Login(BaseModel):
     username: str
-    password: str
+    password: str | None = None  # no longer required
 
 
 @app.get("/api/health")
 def health():
-    user, pw, _ = _creds()
-    return {"ok": True, "version": __version__, "login_configured": bool(user and pw),
+    return {"ok": True, "version": __version__, "login_mode": "name-only",
             "import_seconds": round(IMPORT_SECONDS, 2), "cpu_count": os.cpu_count(),
             "cache_files": sorted(os.listdir(session.CACHE_DIR)) if os.path.isdir(session.CACHE_DIR) else [],
             "sessions_in_memory": len(session._SESSIONS), "timings": session.TIMINGS[-20:]}
@@ -134,18 +129,15 @@ def health():
 
 @app.post("/api/login")
 def login(body: Login, request: Request, response: Response):
-    user, pw, secret = _creds()
-    if not (user and pw):
-        raise HTTPException(status_code=503, detail="Login is not configured on the server")
-    ok = hmac.compare_digest(body.username.strip(), user) & hmac.compare_digest(body.password, pw)
-    _record("login", request, body.username.strip()[:40], bool(ok))
+    name = " ".join(body.username.split())[:40].replace(":", " ")
+    ok = len(name) >= 2
+    _record("login", request, name, ok)
     if not ok:
-        time.sleep(0.8)
-        raise HTTPException(status_code=401, detail="Wrong username or password")
+        raise HTTPException(status_code=400, detail="Please enter your name")
     secure = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
-    response.set_cookie(COOKIE, make_token(user, secret), max_age=SESSION_SECONDS, httponly=True,
+    response.set_cookie(COOKIE, make_token(name, _secret()), max_age=SESSION_SECONDS, httponly=True,
                         secure=secure, samesite="lax", path="/")
-    return {"ok": True, "user": user}
+    return {"ok": True, "user": name}
 
 
 @app.post("/api/logout")
