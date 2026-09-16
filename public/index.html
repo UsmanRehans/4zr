@@ -69,18 +69,7 @@
 </head>
 <body>
 
-<div id="login">
-  <form class="card" id="loginForm">
-    <h1>🎯 DoseFuse</h1>
-    <p class="sub">Deformable dose accumulation for reirradiation</p>
-    <label>Your name</label><input type="text" id="u" autocomplete="name" placeholder="e.g. Dr. Zeinab Reda" required minlength="2" maxlength="40">
-    <div class="err" id="loginErr"></div>
-    <button type="submit" id="loginBtn" style="width:100%">Continue</button>
-    <div class="credit">Made by <b>ZR</b></div>
-  </form>
-</div>
-
-<div id="app" class="hidden">
+<div id="app">
   <aside>
     <h2>🎯 DoseFuse</h2>
     <div class="sub">Deformable dose accumulation prototype v0.1</div>
@@ -109,7 +98,6 @@
     <label>Limit (Gy EQD2)</label><input type="number" id="cLimit" value="60" step="1">
     <div id="cResult" style="margin-top:8px;font-size:13px"></div>
 
-    <div style="margin-top:26px"><button class="secondary" id="logout" style="width:100%">Sign out</button></div>
   </aside>
 
   <main>
@@ -184,25 +172,12 @@ const DASH = {moving_warped:'dot', reference:'dash', physical_sum:'dashdot', eqd
 const PAL = ['#ff7043','#ab47bc','#ffee58','#ef5350','#4fc3f7','#66bb6a','#9e9e9e','#29b6f6'];
 const fmt = (x,d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
 
-// ---------- auth
+// ---------- api
 async function api(path, opts={}) {
   const r = await fetch(path, {credentials:'same-origin', ...opts});
-  if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch(e){} throw new Error(m); }
   return r;
 }
-function showLogin(){ $('login').classList.remove('hidden'); $('app').classList.add('hidden'); }
-function showApp(){ $('login').classList.add('hidden'); $('app').classList.remove('hidden'); }
-$('loginForm').addEventListener('submit', async e => {
-  e.preventDefault(); $('loginErr').textContent=''; $('loginBtn').disabled = true;
-  try {
-    const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, credentials:'same-origin',
-                          body: JSON.stringify({username:$('u').value})});
-    if (!r.ok) { const j = await r.json().catch(()=>({})); $('loginErr').textContent = j.detail || 'Sign-in failed'; return; }
-    showApp(); run();
-  } finally { $('loginBtn').disabled = false; }
-});
-$('logout').onclick = async () => { await fetch('/api/logout', {method:'POST', credentials:'same-origin'}); R=null; showLogin(); };
 
 // ---------- controls
 const bindRange = (id, key, vid, d=0) => { const el=$(id); el.oninput = () => { S[key]=+el.value; $(vid).textContent = (+el.value).toFixed(d); if (key!=='grid' && key!=='iters') refreshImages(); }; };
@@ -234,7 +209,293 @@ async function run() {
     const q = new URLSearchParams({method:S.method, grid:S.grid, iters:S.iters});
     R = await (await api('/api/run?'+q)).json();
     renderSummary();
-  } catch(e) { if (e.message!=='unauthorized') alert('Run failed: '+e.message); }
+  } catch(e) { alert('Run failed: '+e.message); }
+  finally { $('overlay').classList.add('hidden'); $('runBtn').disabled = false; }
+}
+function P(extra={}) { return new URLSearchParams({method:S.method, grid:S.grid, iters:S.iters, axis:S.axis, idx:S.idx, ...extra}).toString(); }
+function refreshImages() {
+  if (!R) return;
+  const set = (id, params) => { const el = $(id); const u = '/api/slice?'+params; if (el.dataset.u !== u) { el.dataset.u = u; el.src = u; } };
+  const common = {structs:S.structs, mov_structs:S.movStructs};
+  if (S.tab==='fusion') { set('img-fr', P({kind:'fusion_rigid', mode:S.mode, alpha:S.alpha, ...common})); set('img-fd', P({kind:'fusion_dir', mode:S.mode, alpha:S.alpha, ...common})); }
+  if (S.tab==='dvf') { set('img-dvf', P({kind:'dvf'})); set('img-jac', P({kind:'jac'})); }
+  if (S.tab==='dose') {
+    const dm = S.shared ? {dmax: Math.max(R.dose_max[S.left]||0, R.dose_max[S.right]||0)} : {};
+    set('img-dl', P({kind:'dose', series:S.left, iso:S.iso, structs:S.structs, ...dm}));
+    set('img-dr', P({kind:'dose', series:S.right, iso:S.iso, structs:S.structs, ...dm}));
+  }
+  if (S.tab==='qa') { set('img-dr1', P({kind:'diff_rigid'})); set('img-dr2', P({kind:'diff_dir'})); }
+}
+
+// ---------- render summary
+function renderSummary() {
+  const v = R.validation, d = R.dvf_stats;
+  const n = R.shape[S.axis]; $('idx').max = n-1; if (S.idx >= n) { S.idx = Math.floor(n/2); $('idx').value=S.idx; $('idxV').textContent=S.idx; }
+  R.dose_max = {}; for (const k of R.dose_series) R.dose_max[k] = R.series_max ? R.series_max[k] : 0;
+  const cord = (R.structure_metrics.SPINAL_CORD||{}).eqd2_sum || {};
+  $('metrics').innerHTML = [
+    ['Mean displacement', fmt(d.mean_displacement_mm)+' mm'], ['Max displacement', fmt(d.max_displacement_mm)+' mm'],
+    ['Jacobian range', fmt(d.jacobian_min,2)+' – '+fmt(d.jacobian_max,2)], ['Folding voxels', fmt(100*d.fraction_folding,2)+' %'],
+    ['TRE (landmarks)', v.tre_dir ? fmt(v.tre_dir.mean,2)+' mm' : '–', v.tre_dir ? (v.tre_dir.mean - v.tre_rigid.mean).toFixed(2)+' mm vs rigid' : ''],
+    ['Cord D0.1cc (EQD2 sum)', fmt(cord['D0.1cc'])+' Gy'], ['Compute time', fmt(R.seconds)+' s']
+  ].map(([l,val,dd]) => `<div class="metric"><div class="l">${l}</div><div class="v">${val}</div>${dd?`<div class="d">${dd}</div>`:''}</div>`).join('');
+
+  // dose series selects
+  for (const id of ['left','right']) { const sel=$(id); sel.innerHTML = R.dose_series.map(s=>`<option ${s===S[id]?'selected':''}>${s}</option>`).join(''); }
+  // constraint select
+  const cs = $('cStruct'); const prev = cs.value; cs.innerHTML = R.structures.map(s=>`<option ${s===(prev||'SPINAL_CORD')?'selected':''}>${s}</option>`).join('');
+  constraint();
+  // dvf table
+  $('dvfTable').innerHTML = '<table><tr><th>statistic (inside BODY)</th><th>value</th></tr>' + Object.entries(d).map(([k,x])=>`<tr><td>${k}</td><td>${fmt(x,3)}</td></tr>`).join('') + '</table>';
+  // metric table
+  const cols = ['volume_cc','Dmax','Dmean','D0.03cc','D0.1cc','D1cc','D2cc','D95%','D2%'];
+  let h = '<table><tr><th>structure</th><th>series</th>' + cols.map(c=>`<th>${c}</th>`).join('') + '</tr>';
+  for (const s of R.structures) for (const ser of Object.keys(LABEL)) { const m = R.structure_metrics[s][ser]; h += `<tr><td>${s}</td><td style="text-align:left">${LABEL[ser]}</td>` + cols.map(c=>`<td>${fmt(m[c])}</td>`).join('') + '</tr>'; }
+  $('metricTable').innerHTML = h + '</table>';
+  // dvh toggles
+  $('dvhStructs').innerHTML = R.structures.map(s=>`<label class="check" style="margin:0"><input type="checkbox" value="${s}" ${S.dvhStructs.includes(s)?'checked':''}> ${s}</label>`).join('');
+  $('dvhSeries').innerHTML = Object.keys(LABEL).map(s=>`<label class="check" style="margin:0"><input type="checkbox" value="${s}" ${S.dvhSeries.includes(s)?'checked':''}> ${LABEL[s]}</label>`).join('');
+  $('dvhStructs').querySelectorAll('input').forEach(i => i.onchange = () => { S.dvhStructs = [...$('dvhStructs').querySelectorAll('input:checked')].map(x=>x.value); drawDVH(); });
+  $('dvhSeries').querySelectorAll('input').forEach(i => i.onchange = () => { S.dvhSeries = [...$('dvhSeries').querySelectorAll('input:checked')].map(x=>x.value); drawDVH(); });
+  // QA tables
+  const qs = v.structures || {};
+  $('qaTable').innerHTML = '<table><tr><th>structure</th><th>Dice rigid</th><th>Dice DIR</th><th>Hausdorff DIR (mm)</th><th>mean surface DIR (mm)</th></tr>' +
+    Object.entries(qs).map(([s,q])=>`<tr><td>${s}</td><td>${fmt(q.dice_rigid,3)}</td><td>${fmt(q.dice_dir,3)}</td><td>${fmt(q.hausdorff_mm_dir,2)}</td><td>${fmt(q.mean_surface_mm_dir,3)}</td></tr>`).join('') + '</table>';
+  if (v.tre_dir) {
+    $('treTable').innerHTML = '<table><tr><th>landmark</th><th>rigid (mm)</th><th>DIR (mm)</th></tr>' + v.tre_dir.per_point.map((x,i)=>`<tr><td>${i+1}</td><td>${fmt(v.tre_rigid.per_point[i],2)}</td><td>${fmt(x,2)}</td></tr>`).join('') +
+      `<tr><td><b>mean</b></td><td><b>${fmt(v.tre_rigid.mean,2)}</b></td><td><b>${fmt(v.tre_dir.mean,2)}</b></td></tr></table>`;
+    const t = v.dose_vs_truth; const keys = ['mean_diff_gy','abs_mean_diff_gy','max_abs_diff_gy','rms_diff_gy'];
+    $('truthTable').innerHTML = '<table><tr><th></th>' + keys.map(k=>`<th>${k}</th>`).join('') + '</tr>' + ['rigid','dir'].map(r=>`<tr><td>${r}</td>`+keys.map(k=>`<td>${fmt(t[r][k],2)}</td>`).join('')+'</tr>').join('') + '</table>';
+  }
+  // export links
+  const q = new URLSearchParams({method:S.method, grid:S.grid, iters:S.iters}).toString();
+  $('ex1').href = '/api/export?which=eqd2&'+q; $('ex2').href = '/api/export?which=physical&'+q; $('ex3').href = '/api/export?which=deformed&'+q;
+  $('log').textContent = R.log.join('\n');
+  if (S.tab==='dvh') drawDVH();
+  refreshImages();
+}
+function constraint() {
+  if (!R) return; const s=$('cStruct').value, m=$('cMetric').value, lim=+$('cLimit').value;
+  const val = ((R.structure_metrics[s]||{}).eqd2_sum||{})[m]; const ok = val <= lim;
+  $('cResult').innerHTML = `<span class="${ok?'pass':'fail'}">${ok?'PASS':'FAIL'}</span> · ${s} ${m} = ${fmt(val)} Gy EQD2 (limit ${lim} Gy)`;
+}
+function drawDVH() {
+  const traces = [];
+  S.dvhStructs.forEach((s,i) => S.dvhSeries.forEach(ser => { const c = (R.dvh[s]||{})[ser]; if (!c) return;
+    traces.push({x:c.dose, y:c.volume_pct, mode:'lines', name:`${s} · ${LABEL[ser]}`, line:{color:PAL[i%PAL.length], dash:DASH[ser], width:2}}); }));
+  Plotly.newPlot('dvhPlot', traces, {paper_bgcolor:'#0f1117', plot_bgcolor:'#171b25', font:{color:'#e6e8ee'}, xaxis:{title:'Dose (Gy)', gridcolor:'#2a3140'}, yaxis:{title:'Volume (%)', gridcolor:'#2a3140', range:[0,102]},
+    margin:{l:50,r:20,t:20,b:50}, legend:{orientation:'h', y:-0.25}}, {responsive:true, displaylogo:false});
+}
+
+// ---------- boot
+fetch('/api/me', {credentials:'same-origin'}).catch(()=>{});  // records the visit
+run();
+</script>
+<style>
+  :root{--bg:#0f1117;--panel:#171b25;--panel2:#1e2430;--line:#2a3140;--text:#e6e8ee;--muted:#9aa3b5;--accent:#ff6b57;--accent2:#4fc3f7;--ok:#66bb6a;--bad:#ef5350}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+  a{color:var(--accent2)}
+  .hidden{display:none!important}
+  /* login */
+  #login{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(1200px 600px at 30% 10%,#1c2331,#0f1117 60%)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:32px 36px;width:min(92vw,400px);box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .card h1{margin:0 0 4px;font-size:24px}
+  .card p.sub{margin:0 0 22px;color:var(--muted)}
+  label{display:block;font-size:12px;color:var(--muted);margin:12px 0 4px}
+  input[type=text],input[type=password],select,input[type=number]{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:9px 10px;font-size:14px}
+  input[type=range]{width:100%;accent-color:var(--accent)}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:10px 14px;font-size:14px;font-weight:600;cursor:pointer}
+  button.secondary{background:var(--panel2);border:1px solid var(--line);color:var(--text)}
+  button:disabled{opacity:.5;cursor:default}
+  .err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
+  .credit{margin-top:22px;text-align:center;color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+  .credit b{color:var(--text)}
+  /* app */
+  #app{display:grid;grid-template-columns:300px 1fr;min-height:100vh}
+  aside{background:var(--panel);border-right:1px solid var(--line);padding:18px 16px 80px;overflow-y:auto;height:100vh;position:sticky;top:0}
+  aside h2{font-size:18px;margin:0 0 2px}
+  aside .sub{color:var(--muted);font-size:12px;margin-bottom:14px}
+  aside h3{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:20px 0 6px}
+  .row{display:flex;gap:8px;align-items:center}
+  .row > *{flex:1}
+  .val{color:var(--accent);font-variant-numeric:tabular-nums;text-align:right;flex:0 0 52px}
+  .info{background:#1a2233;border:1px solid #27405a;border-radius:8px;padding:10px;font-size:12px;color:#c9d6e6;margin:8px 0}
+  .seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{flex:1;background:transparent;color:var(--muted);border-radius:0;padding:7px 4px;font-weight:500}
+  .seg button.on{background:var(--accent);color:#fff}
+  .check{display:flex;gap:8px;align-items:center;margin:6px 0;font-size:13px}
+  main{padding:18px 22px 70px;min-width:0}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}
+  .metric{background:var(--panel2);border-radius:10px;padding:10px 14px}
+  .metric .l{font-size:11px;color:var(--muted)}
+  .metric .v{font-size:22px;font-weight:600;margin-top:2px}
+  .metric .d{font-size:11px;color:var(--ok)}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px;overflow-x:auto}
+  .tabs button{background:transparent;color:var(--muted);border-radius:0;padding:8px 12px;border-bottom:2px solid transparent;font-weight:500;white-space:nowrap}
+  .tabs button.on{color:var(--text);border-bottom-color:var(--accent)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .two img{width:100%;background:#000;border-radius:10px;min-height:200px}
+  .ctl{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:12px}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;font-variant-numeric:tabular-nums}
+  th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--muted);font-weight:500;position:sticky;top:0;background:var(--panel)}
+  .tbl{max-height:420px;overflow:auto;border:1px solid var(--line);border-radius:10px;margin-top:12px}
+  .cap{color:var(--muted);font-size:12px;margin-top:8px}
+  .pass{color:var(--ok);font-weight:600}.fail{color:var(--bad);font-weight:600}
+  .badge{position:fixed;right:14px;bottom:12px;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12px;color:var(--muted);letter-spacing:.06em;z-index:50}
+  .badge b{color:var(--text)}
+  #overlay{position:fixed;inset:0;background:rgba(15,17,23,.85);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:40;gap:10px}
+  .spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:s 1s linear infinite}
+  @keyframes s{to{transform:rotate(360deg)}}
+  pre{background:var(--panel2);border-radius:10px;padding:12px;overflow:auto;font-size:12px}
+  @media (max-width:900px){#app{grid-template-columns:1fr}aside{position:static;height:auto}.two{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div id="app">
+  <aside>
+    <h2>🎯 DoseFuse</h2>
+    <div class="sub">Deformable dose accumulation prototype v0.1</div>
+    <div class="info" id="phantomInfo">Course A: 60 Gy / 30 fx (old CT) · Course B: 30 Gy / 5 fx (new CT, reference). The two CTs are linked by a known deformation, so registration error can be measured.</div>
+
+    <h3>Registration</h3>
+    <label>Deformable method</label>
+    <select id="method"><option value="bspline">B-spline (multi-resolution)</option><option value="demons">Symmetric Demons</option><option value="rigid">Rigid only</option></select>
+    <label>B-spline control-point spacing (mm)</label>
+    <div class="row"><input type="range" id="grid" min="25" max="80" step="5" value="40"><span class="val" id="gridV">40</span></div>
+    <label>Deformable iterations (per level)</label>
+    <div class="row"><input type="range" id="iters" min="5" max="40" step="5" value="20"><span class="val" id="itersV">20</span></div>
+    <button id="runBtn" style="width:100%;margin-top:12px">▶ Run registration + accumulation</button>
+
+    <h3>Viewer</h3>
+    <label>Plane</label>
+    <div class="seg" id="axisSeg"><button data-v="axial" class="on">axial</button><button data-v="coronal">coronal</button><button data-v="sagittal">sagittal</button></div>
+    <label>Slice</label>
+    <div class="row"><input type="range" id="idx" min="0" max="47" value="24"><span class="val" id="idxV">24</span></div>
+    <div class="check"><input type="checkbox" id="structs" checked><span>Show reference structures</span></div>
+    <div class="check"><input type="checkbox" id="movStructs"><span>Show warped moving structures (dashed)</span></div>
+
+    <h3>Constraint check (EQD2 sum)</h3>
+    <label>OAR</label><select id="cStruct"></select>
+    <label>Metric</label><select id="cMetric"><option>D0.03cc</option><option selected>D0.1cc</option><option>D1cc</option><option>D2cc</option><option>Dmax</option><option>Dmean</option></select>
+    <label>Limit (Gy EQD2)</label><input type="number" id="cLimit" value="60" step="1">
+    <div id="cResult" style="margin-top:8px;font-size:13px"></div>
+
+  </aside>
+
+  <main>
+    <div class="metrics" id="metrics"></div>
+    <div class="tabs" id="tabs">
+      <button data-t="fusion" class="on">Fusion</button><button data-t="dvf">DVF &amp; Jacobian</button><button data-t="dose">Dose</button><button data-t="dvh">DVH &amp; metrics</button><button data-t="qa">DIR QA</button><button data-t="export">Export</button><button data-t="log">Log</button>
+    </div>
+
+    <section id="t-fusion">
+      <div class="ctl">
+        <div><label>Fusion mode</label><select id="mode"><option value="blend">Color blend (fixed = green, moving = magenta)</option><option value="checker">Checkerboard</option><option value="fixed">Fixed CT only</option><option value="moving">Moving CT only</option></select></div>
+        <div><label>Moving opacity</label><div class="row"><input type="range" id="alpha" min="0" max="1" step="0.05" value="0.5"><span class="val" id="alphaV">0.50</span></div></div>
+        <div class="cap" style="align-self:end">Left: after rigid registration only. Right: after deformable registration. Grey = agreement; colored fringes = residual misalignment.</div>
+      </div>
+      <div class="two"><img id="img-fr" alt="rigid fusion"><img id="img-fd" alt="DIR fusion"></div>
+    </section>
+
+    <section id="t-dvf" class="hidden">
+      <div class="two"><img id="img-dvf" alt="DVF"><img id="img-jac" alt="Jacobian"></div>
+      <div class="tbl" id="dvfTable"></div>
+      <div class="cap">TG-132: inspect the DVF for physical plausibility. det J ≤ 0 means folding (highlighted in green); values far from 1 flag unrealistic local volume change.</div>
+    </section>
+
+    <section id="t-dose" class="hidden">
+      <div class="ctl">
+        <div><label>Left panel</label><select id="left"></select></div>
+        <div><label>Right panel</label><select id="right"></select></div>
+        <div><label>Isodose lines (Gy)</label><input type="text" id="iso" value="10, 20, 30, 45, 60, 80, 100"></div>
+        <div class="check" style="align-self:end"><input type="checkbox" id="shared" checked><span>Shared color scale</span></div>
+      </div>
+      <div class="two"><img id="img-dl" alt="dose left"><img id="img-dr" alt="dose right"></div>
+      <div class="cap">All doses are shown on the reference CT. The accumulation grid is the reference RTDOSE grid; the deformed dose is sampled as D_A(T(x)) with trilinear interpolation (no Jacobian correction).</div>
+    </section>
+
+    <section id="t-dvh" class="hidden">
+      <div class="ctl"><div><label>Structures</label><div id="dvhStructs" style="display:flex;flex-wrap:wrap;gap:8px 14px"></div></div>
+      <div><label>Dose series</label><div id="dvhSeries" style="display:flex;flex-wrap:wrap;gap:8px 14px"></div></div></div>
+      <div id="dvhPlot" style="height:430px"></div>
+      <div class="tbl" id="metricTable"></div>
+    </section>
+
+    <section id="t-qa" class="hidden">
+      <p><b>Structure agreement after registration</b> (moving structures warped onto the reference CT vs. the reference structures). TG-132 tolerance: Dice &gt; 0.8–0.9, mean surface distance &lt; 2–3 mm.</p>
+      <div class="tbl" id="qaTable"></div>
+      <p style="margin-top:18px"><b>Landmark TRE vs. known ground-truth deformation</b> (phantom only)</p>
+      <div class="tbl" id="treTable"></div>
+      <p style="margin-top:18px"><b>Deformed dose vs. dose mapped with the true deformation</b> (inside BODY)</p>
+      <div class="tbl" id="truthTable"></div>
+      <div class="two" style="margin-top:14px"><img id="img-dr1" alt="rigid minus truth"><img id="img-dr2" alt="DIR minus truth"></div>
+    </section>
+
+    <section id="t-export" class="hidden">
+      <p>Download the deformed dose and the accumulated doses as DICOM RTDOSE (importable into Eclipse / Velocity / MIM for comparison).</p>
+      <div class="row" style="max-width:720px"><a id="ex1" class="secondary" href="#"><button class="secondary" style="width:100%">RTDOSE_sum_EQD2.dcm</button></a><a id="ex2" href="#"><button class="secondary" style="width:100%">RTDOSE_sum_physical.dcm</button></a><a id="ex3" href="#"><button class="secondary" style="width:100%">RTDOSE_A_deformed_to_B.dcm</button></a></div>
+    </section>
+
+    <section id="t-log" class="hidden"><pre id="log"></pre></section>
+  </main>
+</div>
+
+<div id="overlay" class="hidden"><div class="spin"></div><div id="overlayMsg">Registering and accumulating…</div><div class="cap" id="overlaySub">Non-default settings are registered live on a small cloud function and can take 1–2 min.</div></div>
+<div class="badge">Made by <b>ZR</b></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const S = {method:'bspline', grid:40, iters:20, axis:'axial', idx:24, mode:'blend', alpha:0.5, structs:1, movStructs:0,
+           left:'Dose A deformed → B', right:'EQD2 sum A+B', iso:'10, 20, 30, 45, 60, 80, 100', shared:1, tab:'fusion',
+           dvhStructs:['GTV','GTV_RECURRENCE','SPINAL_CORD','HEART','LUNG_R'], dvhSeries:['moving_warped','reference','eqd2_sum']};
+let R = null;  // last /api/run summary
+const LABEL = {moving_warped:'A deformed', reference:'B', physical_sum:'A+B physical', eqd2_sum:'A+B EQD2'};
+const DASH = {moving_warped:'dot', reference:'dash', physical_sum:'dashdot', eqd2_sum:'solid'};
+const PAL = ['#ff7043','#ab47bc','#ffee58','#ef5350','#4fc3f7','#66bb6a','#9e9e9e','#29b6f6'];
+const fmt = (x,d=1) => (x==null||isNaN(x)) ? '–' : Number(x).toFixed(d);
+
+// ---------- api
+async function api(path, opts={}) {
+  const r = await fetch(path, {credentials:'same-origin', ...opts});
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch(e){} throw new Error(m); }
+  return r;
+}
+
+// ---------- controls
+const bindRange = (id, key, vid, d=0) => { const el=$(id); el.oninput = () => { S[key]=+el.value; $(vid).textContent = (+el.value).toFixed(d); if (key!=='grid' && key!=='iters') refreshImages(); }; };
+bindRange('grid','grid','gridV'); bindRange('iters','iters','itersV'); bindRange('idx','idx','idxV'); bindRange('alpha','alpha','alphaV',2);
+$('method').onchange = e => S.method = e.target.value;
+$('mode').onchange = e => { S.mode = e.target.value; refreshImages(); };
+$('structs').onchange = e => { S.structs = e.target.checked?1:0; refreshImages(); };
+$('movStructs').onchange = e => { S.movStructs = e.target.checked?1:0; refreshImages(); };
+$('left').onchange = e => { S.left = e.target.value; refreshImages(); };
+$('right').onchange = e => { S.right = e.target.value; refreshImages(); };
+$('iso').onchange = e => { S.iso = e.target.value; refreshImages(); };
+$('shared').onchange = e => { S.shared = e.target.checked?1:0; refreshImages(); };
+$('axisSeg').querySelectorAll('button').forEach(b => b.onclick = () => {
+  $('axisSeg').querySelectorAll('button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  S.axis = b.dataset.v; const n = R ? R.shape[S.axis] : 48; $('idx').max = n-1; S.idx = Math.floor(n/2); $('idx').value = S.idx; $('idxV').textContent = S.idx; refreshImages();
+});
+$('tabs').querySelectorAll('button').forEach(b => b.onclick = () => {
+  $('tabs').querySelectorAll('button').forEach(x=>x.classList.remove('on')); b.classList.add('on');
+  S.tab = b.dataset.t; document.querySelectorAll('main section').forEach(s => s.classList.toggle('hidden', s.id !== 't-'+S.tab));
+  if (S.tab==='dvh' && R) drawDVH(); refreshImages();
+});
+['cStruct','cMetric','cLimit'].forEach(id => $(id).onchange = constraint);
+$('runBtn').onclick = run;
+
+// ---------- run
+async function run() {
+  $('overlay').classList.remove('hidden'); $('runBtn').disabled = true;
+  try {
+    const q = new URLSearchParams({method:S.method, grid:S.grid, iters:S.iters});
+    R = await (await api('/api/run?'+q)).json();
+    renderSummary();
+  } catch(e) { alert('Run failed: '+e.message); }
   finally { $('overlay').classList.add('hidden'); $('runBtn').disabled = false; }
 }
 function P(extra={}) { return new URLSearchParams({method:S.method, grid:S.grid, iters:S.iters, axis:S.axis, idx:S.idx, ...extra}).toString(); }

@@ -1,7 +1,7 @@
 """DoseFuse HTTP API (FastAPI) - runs as a Vercel Python function.
 
-Access: name-only sign-in (no password). The visitor types their name, which is stored in an
-HMAC-signed HttpOnly cookie (secret DOSEFUSE_SECRET) and recorded with each visit for the audit log.
+Access: open, no sign-in. Every page open is still recorded (IP geolocation from Vercel headers) for
+the visit log. The optional /api/login endpoint lets a visitor attach a name to their cookie.
 """
 import hashlib
 import hmac
@@ -56,10 +56,8 @@ def check_token(token: str | None) -> str | None:
 
 
 def require_auth(request: Request) -> str:
-    name = check_token(request.cookies.get(COOKIE))
-    if not name:
-        raise HTTPException(status_code=401, detail="Not signed in")
-    return name
+    """Access is open; this only resolves an optional visitor name from the cookie."""
+    return check_token(request.cookies.get(COOKIE)) or ""
 
 
 app = FastAPI(title="DoseFuse API", version=__version__)
@@ -121,7 +119,7 @@ class Login(BaseModel):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": __version__, "login_mode": "name-only",
+    return {"ok": True, "version": __version__, "login_mode": "open",
             "import_seconds": round(IMPORT_SECONDS, 2), "cpu_count": os.cpu_count(),
             "cache_files": sorted(os.listdir(session.CACHE_DIR)) if os.path.isdir(session.CACHE_DIR) else [],
             "sessions_in_memory": len(session._SESSIONS), "timings": session.TIMINGS[-20:]}
@@ -148,11 +146,9 @@ def logout(response: Response):
 
 @app.get("/api/me")
 def me(request: Request):
-    """Called on every page load: records the visit (signed in or not), then reports the session."""
-    name = check_token(request.cookies.get(COOKIE))
-    _record("visit", request, name or "", bool(name))
-    if not name:
-        raise HTTPException(status_code=401, detail="Not signed in")
+    """Called on every page load: records the visit with geolocation; returns the optional visitor name."""
+    name = check_token(request.cookies.get(COOKIE)) or ""
+    _record("visit", request, name, True)
     return {"user": name}
 
 
