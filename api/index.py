@@ -5,9 +5,13 @@ HMAC-signed HttpOnly cookies (secret DOSEFUSE_SECRET, or derived from the passwo
 """
 import hashlib
 import hmac
+import json
 import os
 import sys
+import threading
 import time
+import urllib.parse
+import urllib.request
 
 _T0 = time.time()
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")  # writable font-cache dir on serverless
@@ -64,6 +68,55 @@ def require_auth(request: Request) -> str:
 
 app = FastAPI(title="DoseFuse API", version=__version__)
 
+# ----------------------------------------------------------------------------- visit / login audit
+_EVENTS: list[dict] = []          # per-instance fallback; Supabase (if configured) is the durable store
+_EVENTS_LOCK = threading.Lock()
+
+
+def _geo(request: Request) -> dict:
+    h = request.headers
+    ip = h.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
+    return {
+        "ip": ip,
+        "country": h.get("x-vercel-ip-country", ""),
+        "region": h.get("x-vercel-ip-country-region", ""),
+        "city": urllib.parse.unquote(h.get("x-vercel-ip-city", "")),
+        "lat": h.get("x-vercel-ip-latitude", ""),
+        "lon": h.get("x-vercel-ip-longitude", ""),
+        "timezone": h.get("x-vercel-ip-timezone", ""),
+        "user_agent": h.get("user-agent", "")[:200],
+    }
+
+
+def _record(kind: str, request: Request, user: str = "", ok: bool | None = None):
+    """Log a visit/login event to stdout (Vercel runtime logs) and, if configured, to Supabase."""
+    ev = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "kind": kind, "user": user,
+          "ok": ok, **_geo(request)}
+    print("AUDIT " + json.dumps(ev), flush=True)
+    with _EVENTS_LOCK:
+        _EVENTS.append(ev)
+        del _EVENTS[:-500]
+    url, key = os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if url and key:
+        try:
+            req = urllib.request.Request(f"{url.rstrip('/')}/rest/v1/visits", data=json.dumps(ev).encode(),
+                                         headers={"apikey": key, "Authorization": f"Bearer {key}",
+                                                  "Content-Type": "application/json", "Prefer": "return=minimal"},
+                                         method="POST")
+            urllib.request.urlopen(req, timeout=3).read()
+        except Exception as e:  # noqa: BLE001
+            print(f"AUDIT supabase insert failed: {e}", flush=True)
+
+
+def _fetch_events(limit: int) -> tuple[list[dict], str]:
+    url, key = os.environ.get("SUPABASE_URL", ""), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    if url and key:
+        req = urllib.request.Request(f"{url.rstrip('/')}/rest/v1/visits?select=*&order=ts.desc&limit={int(limit)}",
+                                     headers={"apikey": key, "Authorization": f"Bearer {key}"})
+        return json.loads(urllib.request.urlopen(req, timeout=5).read()), "supabase"
+    with _EVENTS_LOCK:
+        return list(reversed(_EVENTS))[:limit], "memory (this function instance only)"
+
 
 class Login(BaseModel):
     username: str
@@ -85,9 +138,7 @@ def login(body: Login, request: Request, response: Response):
     if not (user and pw):
         raise HTTPException(status_code=503, detail="Login is not configured on the server")
     ok = hmac.compare_digest(body.username.strip(), user) & hmac.compare_digest(body.password, pw)
-    ip = request.headers.get("x-forwarded-for", request.client.host if request.client else "?").split(",")[0].strip()
-    print(f"AUDIT login {'OK' if ok else 'FAIL'} user={body.username.strip()!r} ip={ip} "
-          f"ua={request.headers.get('user-agent', '?')[:80]!r}", flush=True)
+    _record("login", request, body.username.strip()[:40], bool(ok))
     if not ok:
         time.sleep(0.8)
         raise HTTPException(status_code=401, detail="Wrong username or password")
@@ -104,8 +155,20 @@ def logout(response: Response):
 
 
 @app.get("/api/me")
-def me(user: str = Depends(require_auth)):
-    return {"user": user}
+def me(request: Request):
+    """Called on every page load: records the visit (signed in or not), then reports the session."""
+    name = check_token(request.cookies.get(COOKIE))
+    _record("visit", request, name or "", bool(name))
+    if not name:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return {"user": name}
+
+
+@app.get("/api/visits")
+def visits(limit: int = 100, _: str = Depends(require_auth)):
+    """Recent page visits and sign-in attempts with IP geolocation (Vercel headers)."""
+    events, source = _fetch_events(max(1, min(limit, 500)))
+    return {"source": source, "events": events}
 
 
 @app.get("/api/run")
