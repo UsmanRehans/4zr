@@ -131,12 +131,13 @@ class Session:
             fig.tight_layout(pad=0.2)
         else:
             raise ValueError(kind)
-        fig.patch.set_facecolor("#0f1117")
+        fig.patch.set_facecolor("#ffffff")
         for ax in fig.axes:
-            ax.title.set_color("#e6e6e6")
-            ax.tick_params(colors="#c8c8c8")
+            ax.title.set_color("#1c638a")
+            ax.title.set_fontweight("bold")
+            ax.tick_params(colors="#303334")
             if ax.yaxis.label:
-                ax.yaxis.label.set_color("#c8c8c8")
+                ax.yaxis.label.set_color("#303334")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", facecolor=fig.get_facecolor())
         plt.close(fig)
