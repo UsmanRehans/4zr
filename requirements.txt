@@ -1,0 +1,5 @@
+SimpleITK>=2.3
+pydicom>=2.4
+numpy
+matplotlib
+fastapi

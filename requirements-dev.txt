@@ -1,0 +1,6 @@
+-r requirements.txt
+scipy
+scikit-image
+plotly
+streamlit
+uvicorn
